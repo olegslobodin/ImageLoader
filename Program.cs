@@ -20,11 +20,6 @@ namespace ImageLoader
 
         static void Main(string[] args)
         {
-            MainAsync(args).GetAwaiter().GetResult();
-        }
-
-        static async Task MainAsync(string[] args)
-        {
             InitArgs(args, out var requestsCount, out var bulkSize);
 
             var random = new Random();
@@ -33,26 +28,24 @@ namespace ImageLoader
                 Directory.CreateDirectory(OUTPUT_DIR);
             }
 
-            var tasks = new List<Task<byte[]>>();
-            var requestsInfo = new List<RequestInfo>();
+            var requestsInfo = new ConcurrentQueue<RequestInfo>();
             var semaphore = new SemaphoreSlim(bulkSize);
             var stopwatchTotal = new Stopwatch();
+            var doneRequestsCount = 0;
 
             stopwatchTotal.Start();
 
-            Parallel.ForEach(Enumerable.Range(0, requestsCount), new ParallelOptions { MaxDegreeOfParallelism = bulkSize }, async i =>
+            Parallel.ForEach(Enumerable.Range(0, requestsCount), async i =>
             {
                 var stopwatch = new Stopwatch();
                 var fileName = $"{random.Next(MIN_NUMBER, MAX_NUMBER + 1)}.png";
                 var startThreadId = Thread.CurrentThread.ManagedThreadId;
 
-                semaphore.Wait();
+                await semaphore.WaitAsync();
                 stopwatch.Start();
 
                 var webClient = new WebClient() { BaseAddress = BASE_URL };
-                var task = webClient.DownloadDataTaskAsync(fileName);
-                tasks.Add(task);
-                var data = await task;
+                var data = await webClient.DownloadDataTaskAsync(fileName);
 
                 stopwatch.Stop();
                 semaphore.Release();
@@ -61,17 +54,22 @@ namespace ImageLoader
                 var endThreadId = Thread.CurrentThread.ManagedThreadId;
                 var savePath = OUTPUT_DIR + fileName;
 
-                requestsInfo.Add(new RequestInfo(i, startThreadId, endThreadId));
+                requestsInfo.Enqueue(new RequestInfo(i, startThreadId, endThreadId));
                 Console.WriteLine($"Request #{i}\tStart thread ID: {startThreadId}\tEnd thread ID: {endThreadId}\tURL: .../{fileName}\t    Size: {contentLength} bytes\tTime: {stopwatch.ElapsedMilliseconds} ms");
                 WriteToFile(savePath, data);
+                Interlocked.Increment(ref doneRequestsCount);
             });
 
-            await Task.WhenAll(tasks);
+            while (doneRequestsCount < requestsCount)
+            {
+                Thread.Sleep(100);
+            }
+
             stopwatchTotal.Stop();
 
             var startThreads = string.Join(", ", requestsInfo.Select(x => x.StartThreadId).Distinct().OrderBy(x => x));
             var endThreads = string.Join(", ", requestsInfo.Select(x => x.EndThreadId).Distinct().OrderBy(x => x));
-
+            
             Console.WriteLine($"Start thread IDs: {startThreads}");
             Console.WriteLine($"End thread IDs:   {endThreads}");
             Console.WriteLine($"Total time: {stopwatchTotal.ElapsedMilliseconds} ms");
